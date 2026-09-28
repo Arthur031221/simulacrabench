@@ -22,9 +22,14 @@ visible rows of the frame:
 - NA_GATED is treated as an ordinary class. Skip routing, rows where the
   routing was not followed, and coding differences between survey rounds are
   learned from the data instead of being hard-coded from the gate rules.
+- A multinomial logistic regression (L2, C = 1) on the one-hot GIVEN block is
+  mixed into each item's count model. The weight comes from an 11-point grid
+  and maximises the log score of the mixture, using the count model's
+  leave-one-out probabilities and 3-fold out-of-fold probabilities of the
+  regression. The regression stops being fitted for further items after 480 s,
+  which keeps the run inside the 900 s development timeout.
 
-The whole run takes well under a minute on a CPU; nothing is trained offline
-and no weights are bundled.
+Nothing is trained offline and no weights are bundled.
 
 ## Reproduce
 
