@@ -12,15 +12,30 @@ list and the a_d are chosen greedily per item by the exact leave-one-out log
 score on the visible rows, which is cheap for count models. NA_GATED is an
 ordinary class here, so gate routing and its violations are learned from the
 data rather than assumed from the gate rules.
+
+A second member, an L2 multinomial logistic regression on the one-hot GIVEN
+block, is mixed in per item. The mixing weight is the one that maximises the
+log score of the mixture on held-out rows: leave-one-out probabilities for the
+backoff and k-fold out-of-fold probabilities for the regression. Only the
+probability of each row's own answer enters that score, so the blend costs one
+extra fit per fold. Items are skipped once the time budget is spent.
 """
+
+import time
+import warnings
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 
 EPS = 1e-3
 ALPHAS = (1.0, 4.0, 16.0, 64.0)
 MAX_DEPTH = 4
 MIN_GAIN = 1e-4
+FOLDS = 3
+LR_C = 1.0
+WEIGHTS = np.linspace(0.0, 1.0, 11)
+BUDGET_SECONDS = 480.0
 
 
 def _codes(column):
@@ -70,7 +85,7 @@ def _fit_item(features, train, y, k):
             break
         best, f, alpha, strata, prev = step
         chosen.append((f, alpha))
-    return chosen
+    return chosen, prev
 
 
 def _predict_item(features, train, held, y, k, chosen):
@@ -89,6 +104,45 @@ def _predict_item(features, train, held, y, k, chosen):
     return p
 
 
+def _one_hot(features):
+    blocks = []
+    for codes in features:
+        width = codes.max() + 1
+        if width > 1:
+            blocks.append(np.eye(width, dtype=np.float32)[codes][:, 1:])
+    return np.hstack(blocks) if blocks else None
+
+
+def _lr_proba(x_fit, y_fit, x_out, k):
+    out = np.zeros((len(x_out), k))
+    classes = np.unique(y_fit)
+    if len(classes) == 1:
+        out[:, classes[0]] = 1.0
+        return out
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = LogisticRegression(C=LR_C, max_iter=200).fit(x_fit, y_fit)
+    out[:, model.classes_] = model.predict_proba(x_out)
+    return out
+
+
+def _lr_oof(x, y, k, rng):
+    """Out-of-fold probability of each row's own answer."""
+    fold = rng.permutation(len(y)) % FOLDS
+    own = np.empty(len(y))
+    for f in range(FOLDS):
+        out = fold == f
+        p = _lr_proba(x[~out], y[~out], x[out], k)
+        own[out] = p[np.arange(out.sum()), y[out]]
+    return own
+
+
+def _best_weight(backoff, lr, k):
+    """Weight on the backoff member that maximises the mixture's log score."""
+    scores = [_log_score(w * backoff + (1 - w) * lr, k) for w in WEIGHTS]
+    return float(WEIGHTS[int(np.argmax(scores))])
+
+
 def predict(frame, schema):
     records = schema["items"]
     items = [name for name, r in records.items() if r["class"] in ("GIVEN", "PREDICT")]
@@ -99,6 +153,9 @@ def predict(frame, schema):
     held = np.flatnonzero(blank.any(axis=1))
     train = np.flatnonzero(~blank.any(axis=1))
     features = [_codes(frame[g]) for g in given]
+    x = _one_hot(features)
+    rng = np.random.default_rng(0)
+    start = time.monotonic()
 
     out = {}
     for name in targets:
@@ -113,8 +170,13 @@ def predict(frame, schema):
             counts = np.bincount(y, minlength=k) + 0.5
             out[name] = np.tile(counts / counts.sum(), (len(held), 1))
             continue
-        chosen = _fit_item(features, rows, y, k)
-        out[name] = _predict_item(features, rows, held, y, k, chosen)
+        chosen, loo = _fit_item(features, rows, y, k)
+        p = _predict_item(features, rows, held, y, k, chosen)
+        if x is not None and len(y) >= 2 * FOLDS and time.monotonic() - start < BUDGET_SECONDS:
+            w = _best_weight(loo, _lr_oof(x[rows], y, k, rng), k)
+            if w < 1.0:
+                p = w * p + (1 - w) * _lr_proba(x[rows], y, x[held], k)
+        out[name] = p
 
     position = {row: i for i, row in enumerate(held)}
     values = frame[items].to_numpy(dtype=object)
