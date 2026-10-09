@@ -22,16 +22,24 @@ visible rows of the frame:
 - NA_GATED is treated as an ordinary class. Skip routing, rows where the
   routing was not followed, and coding differences between survey rounds are
   learned from the data instead of being hard-coded from the gate rules.
-- A multinomial logistic regression (L2, C = 1) on the one-hot GIVEN block is
+- A multinomial logistic regression (L2, C = 1) on a sparse one-hot GIVEN block is
   mixed into each item's count model. The weight comes from an 11-point grid
   and maximises the log score of the mixture, using the count model's
   leave-one-out probabilities and 3-fold out-of-fold probabilities of the
-  regression. Regression fitting stops for new items after 480 s per
-  instrument. The three local sandbox checks took 1,241.2 s in total, above the
-  900 s development limit. Reduce the fitting budget before submitting this
-  version in development.
+  regression. The design matrix uses float64 CSR storage, and regression fits
+  use one CPU thread. A soft deadline 120 s after entry into `predict()` is
+  checked before each fold and final refit. If the deadline passes, that item
+  keeps its count-model prediction. An individual fit can run past the
+  deadline, so the full submission still needs a timing rehearsal against the
+  900 s development limit.
 
 Nothing is trained offline and no weights are bundled.
+
+The packaged candidate passed all three full-size, seed-0 synthetic phase-1
+checks on Python 3.13.15, with each scorer process restricted to one CPU core.
+The total wall time was 121.919 s: UNICEF 17.626 s, World Bank 28.868 s and
+UNHCR 75.425 s. These measurements qualify the pipeline and runtime, not the
+score on the unreleased surveys.
 
 ## Reproduce
 

@@ -18,7 +18,9 @@ block, is mixed in per item. The mixing weight is the one that maximises the
 log score of the mixture on held-out rows: leave-one-out probabilities for the
 backoff and k-fold out-of-fold probabilities for the regression. Only the
 probability of each row's own answer enters that score, so the blend costs one
-extra fit per fold. Items are skipped once the time budget is spent.
+extra fit per fold. Optional regression fitting stops at a soft deadline
+checked before each fold and final refit. An unfinished item keeps its backoff
+prediction.
 """
 
 import time
@@ -27,6 +29,8 @@ import warnings
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+from scipy import sparse
+from threadpoolctl import threadpool_limits
 
 EPS = 1e-3
 ALPHAS = (1.0, 4.0, 16.0, 64.0)
@@ -35,7 +39,7 @@ MIN_GAIN = 1e-4
 FOLDS = 3
 LR_C = 1.0
 WEIGHTS = np.linspace(0.0, 1.0, 11)
-BUDGET_SECONDS = 480.0
+BUDGET_SECONDS = 120.0
 
 
 def _codes(column):
@@ -109,32 +113,40 @@ def _one_hot(features):
     for codes in features:
         width = codes.max() + 1
         if width > 1:
-            blocks.append(np.eye(width, dtype=np.float32)[codes][:, 1:])
-    return np.hstack(blocks) if blocks else None
+            rows = np.flatnonzero(codes)
+            blocks.append(sparse.csr_matrix(
+                (np.ones(len(rows)), (rows, codes[rows] - 1)),
+                shape=(len(codes), width - 1),
+            ))
+    return sparse.hstack(blocks, format="csr") if blocks else None
 
 
 def _lr_proba(x_fit, y_fit, x_out, k):
-    out = np.zeros((len(x_out), k))
+    out = np.zeros((x_out.shape[0], k))
     classes = np.unique(y_fit)
     if len(classes) == 1:
         out[:, classes[0]] = 1.0
         return out
-    with warnings.catch_warnings():
+    with threadpool_limits(limits=1), warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model = LogisticRegression(C=LR_C, max_iter=200).fit(x_fit, y_fit)
-    out[:, model.classes_] = model.predict_proba(x_out)
+        model = LogisticRegression(
+            C=LR_C, solver="lbfgs", max_iter=200, tol=1e-4,
+        ).fit(x_fit, y_fit)
+        out[:, model.classes_] = model.predict_proba(x_out)
     return out
 
 
-def _lr_oof(x, y, k, rng):
+def _lr_oof(x, y, k, rng, deadline):
     """Out-of-fold probability of each row's own answer."""
     fold = rng.permutation(len(y)) % FOLDS
     own = np.empty(len(y))
     for f in range(FOLDS):
+        if time.monotonic() >= deadline:
+            return None
         out = fold == f
         p = _lr_proba(x[~out], y[~out], x[out], k)
         own[out] = p[np.arange(out.sum()), y[out]]
-    return own
+    return own if time.monotonic() < deadline else None
 
 
 def _best_weight(backoff, lr, k):
@@ -144,6 +156,7 @@ def _best_weight(backoff, lr, k):
 
 
 def predict(frame, schema):
+    deadline = time.monotonic() + BUDGET_SECONDS
     records = schema["items"]
     items = [name for name, r in records.items() if r["class"] in ("GIVEN", "PREDICT")]
     given = [name for name in items if records[name]["class"] == "GIVEN"]
@@ -155,7 +168,6 @@ def predict(frame, schema):
     features = [_codes(frame[g]) for g in given]
     x = _one_hot(features)
     rng = np.random.default_rng(0)
-    start = time.monotonic()
 
     out = {}
     for name in targets:
@@ -172,10 +184,14 @@ def predict(frame, schema):
             continue
         chosen, loo = _fit_item(features, rows, y, k)
         p = _predict_item(features, rows, held, y, k, chosen)
-        if x is not None and len(y) >= 2 * FOLDS and time.monotonic() - start < BUDGET_SECONDS:
-            w = _best_weight(loo, _lr_oof(x[rows], y, k, rng), k)
-            if w < 1.0:
-                p = w * p + (1 - w) * _lr_proba(x[rows], y, x[held], k)
+        if x is not None and len(y) >= 2 * FOLDS and time.monotonic() < deadline:
+            own = _lr_oof(x[rows], y, k, rng, deadline)
+            if own is not None:
+                w = _best_weight(loo, own, k)
+                if w < 1.0 and time.monotonic() < deadline:
+                    regression = _lr_proba(x[rows], y, x[held], k)
+                    if time.monotonic() < deadline:
+                        p = w * p + (1 - w) * regression
         out[name] = p
 
     position = {row: i for i, row in enumerate(held)}
