@@ -26,8 +26,10 @@ visible rows of the frame:
   mixed into each item's count model. The weight comes from an 11-point grid
   and maximises the log score of the mixture, using the count model's
   leave-one-out probabilities and 3-fold out-of-fold probabilities of the
-  regression. The regression stops being fitted for further items after 480 s,
-  which keeps the run inside the 900 s development timeout.
+  regression. Regression fitting stops for new items after 480 s per
+  instrument. The three sandbox prediction calls took 1,237.1 s in total, above the
+  900 s development limit. Reduce the fitting budget before submitting this
+  version in development.
 
 Nothing is trained offline and no weights are bundled.
 

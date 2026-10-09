@@ -1,7 +1,6 @@
-# Everything your submission imports must be named here. This file is
-# installed while the network is still up; after that there is no way to get a
-# package, so anything you forgot is an ImportError at scoring time
-# Pin your own dependencies exactly (package==1.2.3)
+# List every imported package here. The grader installs dependencies before
+# disabling network access. A missing dependency causes an ImportError during
+# scoring. Use package==1.2.3 to pin a dependency to a specific version.
 numpy>=1.26
 pandas>=2.2
 scikit-learn==1.9.1
