@@ -27,7 +27,7 @@ visible rows of the frame:
   and maximises the log score of the mixture, using the count model's
   leave-one-out probabilities and 3-fold out-of-fold probabilities of the
   regression. Regression fitting stops for new items after 480 s per
-  instrument. The three sandbox prediction calls took 1,237.1 s in total, above the
+  instrument. The three local sandbox checks took 1,241.2 s in total, above the
   900 s development limit. Reduce the fitting budget before submitting this
   version in development.
 
