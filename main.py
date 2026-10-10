@@ -14,15 +14,14 @@ ordinary class here, so gate routing and its violations are learned from the
 data rather than assumed from the gate rules.
 
 A second member, an L2 multinomial logistic regression on the one-hot GIVEN
-block, is mixed in per item. The mixing weight is the one that maximises the
-log score of the mixture on held-out rows: leave-one-out probabilities for the
-backoff and k-fold out-of-fold probabilities for the regression. Only the
-probability of each row's own answer enters that score, so the blend costs one
-extra fit per fold. Optional regression fitting stops at a soft deadline
-checked before each fold and final refit. An unfinished item keeps its backoff
-prediction.
+block and country/wave interactions, is mixed in per item. Both members are
+refitted on the same three training complements to choose the mixture by
+held-out log score. Complete backoff predictions are computed first. Each
+optional item runs in a separate process with a time limit and keeps its
+backoff prediction if the process fails or runs late.
 """
 
+import multiprocessing
 import time
 import warnings
 
@@ -39,7 +38,11 @@ MIN_GAIN = 1e-4
 FOLDS = 3
 LR_C = 1.0
 WEIGHTS = np.linspace(0.0, 1.0, 11)
-BUDGET_SECONDS = 120.0
+BUDGET_SECONDS = 180.0
+ITEM_SECONDS = 20.0
+PAIR_COLUMNS = 256
+INTERACTION_COLUMNS = 1024
+COUNTRY_COLUMNS = ("Country", "user.country", "s1_2_country_asylum_lbl")
 
 
 def _codes(column):
@@ -136,17 +139,118 @@ def _lr_proba(x_fit, y_fit, x_out, k):
     return out
 
 
-def _lr_oof(x, y, k, rng, deadline):
-    """Out-of-fold probability of each row's own answer."""
-    fold = rng.permutation(len(y)) % FOLDS
-    own = np.empty(len(y))
+def _interaction_pairs(given, records):
+    """Choose bounded pairs from declared GIVEN supports, without labels."""
+    anchors = [i for i, name in enumerate(given)
+               if name in COUNTRY_COLUMNS or name == "wave"]
+    pairs, seen, columns = [], set(), 0
+    for anchor in anchors:
+        for other in range(len(given)):
+            pair = tuple(sorted((anchor, other)))
+            if anchor == other or pair in seen:
+                continue
+            seen.add(pair)
+            widths = [len(records[given[i]]["values"])
+                      + bool(records[given[i]].get("gate")) for i in pair]
+            width = widths[0] * widths[1]
+            if width > PAIR_COLUMNS or columns + width > INTERACTION_COLUMNS:
+                continue
+            pairs.append((pair[0], pair[1], width))
+            columns += width
+    return pairs
+
+
+def _design(features, given, records):
+    blocks = []
+    additive = _one_hot(features)
+    if additive is not None:
+        blocks.append(additive)
+    for first, second, bound in _interaction_pairs(given, records):
+        joint = _nest(features[first], features[second])
+        width = int(joint.max()) + 1
+        if width > bound:
+            continue
+        blocks.append(sparse.csr_matrix(
+            (np.ones(len(joint)), (np.arange(len(joint)), joint)),
+            shape=(len(joint), width),
+        ))
+    return sparse.hstack(blocks, format="csr") if blocks else None
+
+
+def _oof_members(features, rows, y, k, x, fold, deadline):
+    backoff, regression = np.empty(len(y)), np.empty(len(y))
     for f in range(FOLDS):
-        if time.monotonic() >= deadline:
+        excluded = fold == f
+        if not excluded.any():
+            continue
+        if (~excluded).sum() < 2 or time.monotonic() >= deadline:
             return None
-        out = fold == f
-        p = _lr_proba(x[~out], y[~out], x[out], k)
-        own[out] = p[np.arange(out.sum()), y[out]]
-    return own if time.monotonic() < deadline else None
+        fit_rows, fit_y = rows[~excluded], y[~excluded]
+        chosen, _ = _fit_item(features, fit_rows, fit_y, k)
+        p = _predict_item(features, fit_rows, rows[excluded], fit_y, k, chosen)
+        backoff[excluded] = p[np.arange(excluded.sum()), y[excluded]]
+        p = _lr_proba(x[fit_rows], fit_y, x[rows[excluded]], k)
+        regression[excluded] = p[np.arange(excluded.sum()), y[excluded]]
+    return (backoff, regression) if time.monotonic() < deadline else None
+
+
+def _stack_worker(sender, features, rows, held, y, k, x, fold, deadline):
+    try:
+        result = None
+        own = _oof_members(features, rows, y, k, x, fold, deadline)
+        if own is not None:
+            weight = _best_weight(*own, k)
+            if weight < 1.0 and time.monotonic() < deadline:
+                p = _lr_proba(x[rows], y, x[held], k)
+                if time.monotonic() < deadline:
+                    result = (weight, p)
+        sender.send(result)
+    except Exception:
+        pass
+    finally:
+        sender.close()
+
+
+def _bounded_stack(features, rows, held, y, k, x, fold, deadline):
+    """Return a complete optional member, cleaning up its process on exit."""
+    if time.monotonic() >= deadline:
+        return None
+    receiver = sender = process = None
+    started = False
+    item_start = time.monotonic()
+    item_deadline = min(deadline, item_start + ITEM_SECONDS)
+    try:
+        context = multiprocessing.get_context("fork")
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_stack_worker,
+            args=(sender, features, rows, held, y, k, x, fold, item_deadline),
+        )
+        process.start()
+        started = True
+        sender.close()
+        remaining = item_deadline - time.monotonic()
+        if remaining > 0 and receiver.poll(remaining):
+            result = receiver.recv()
+            if time.monotonic() < item_deadline:
+                return result
+    except (OSError, EOFError, RuntimeError, ValueError):
+        pass
+    finally:
+        if receiver is not None:
+            receiver.close()
+        if sender is not None:
+            sender.close()
+        if started:
+            process.join(timeout=0.05)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=0.5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            process.close()
+    return None
 
 
 def _best_weight(backoff, lr, k):
@@ -166,10 +270,9 @@ def predict(frame, schema):
     held = np.flatnonzero(blank.any(axis=1))
     train = np.flatnonzero(~blank.any(axis=1))
     features = [_codes(frame[g]) for g in given]
-    x = _one_hot(features)
-    rng = np.random.default_rng(0)
+    fold = np.random.default_rng(0).permutation(len(train)) % FOLDS
 
-    out = {}
+    out, training = {}, {}
     for name in targets:
         r = records[name]
         options = list(r["values"]) + ([schema["gated_value"]] if r.get("gate") else [])
@@ -182,17 +285,23 @@ def predict(frame, schema):
             counts = np.bincount(y, minlength=k) + 0.5
             out[name] = np.tile(counts / counts.sum(), (len(held), 1))
             continue
-        chosen, loo = _fit_item(features, rows, y, k)
+        chosen, _ = _fit_item(features, rows, y, k)
         p = _predict_item(features, rows, held, y, k, chosen)
-        if x is not None and len(y) >= 2 * FOLDS and time.monotonic() < deadline:
-            own = _lr_oof(x[rows], y, k, rng, deadline)
-            if own is not None:
-                w = _best_weight(loo, own, k)
-                if w < 1.0 and time.monotonic() < deadline:
-                    regression = _lr_proba(x[rows], y, x[held], k)
-                    if time.monotonic() < deadline:
-                        p = w * p + (1 - w) * regression
         out[name] = p
+        training[name] = (rows, y, k, fold[known])
+
+    if features and time.monotonic() < deadline:
+        x = _design(features, given, records)
+        if x is not None:
+            for name, (rows, y, k, item_fold) in training.items():
+                if time.monotonic() >= deadline:
+                    break
+                if len(y) < 2 * FOLDS:
+                    continue
+                member = _bounded_stack(features, rows, held, y, k, x, item_fold, deadline)
+                if member is not None and time.monotonic() < deadline:
+                    weight, regression = member
+                    out[name] = weight * out[name] + (1 - weight) * regression
 
     position = {row: i for i, row in enumerate(held)}
     values = frame[items].to_numpy(dtype=object)
