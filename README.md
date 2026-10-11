@@ -1,4 +1,4 @@
-# SimulacraBench submission
+# SimulacraBench submission: stack_trees_v5
 
 Code for the SimulacraBench competition on Codabench: probabilistic completion
 of survey responses for three instruments (UNICEF, World Bank, UNHCR). For each
@@ -31,25 +31,30 @@ visible rows of the frame:
 - Both members use the same three respondent folds. Backoff feature selection
   and smoothing are refitted on each training complement. An 11-point grid
   selects the mixture weight by held-out log score, including the scorer's
-  1e-3 mixing. Returned vectors receive that mixing in the grader. The selected
-  blend score requires an independent evaluation before it can estimate gain.
+  1e-3 mixing. Returned vectors receive that mixing in the grader. The tree
+  member uses the same folds and scorer objective, with its own simplex search.
 - Complete count-model predictions are computed first. Optional item fitting
-  runs serially in separate Linux processes, with a 20 s item limit and a
-  deadline 180 s after entry into `predict()`. Late or failed results keep the
-  complete count-model prediction. Each child is joined or terminated before
-  the call returns. If process creation is unavailable, the count model handles
-  the item.
+  runs serially in separate Linux processes. The matched-fold LR stage has a
+  20 s item limit and a deadline 180 s after entry into `predict()`. It caches
+  only complete OOF true-class probabilities for both backoff and LR. The
+  categorical HistGradientBoosting stage follows through 240 s after entry,
+  also with a 20 s item limit, for items with at least 600 known labels, two
+  observed classes and a complete LR OOF cache. Its three fold models use only
+  each fold's complement. Declared GIVEN category order is retained. Unknown
+  and missing values become missing categories. Each tree distribution is mixed
+  with its fold-local Jeffreys marginal, then calibrated and blended on the
+  constrained simplex using the grader's epsilon-mixed log score. A successful
+  tree replaces an item only after full refits complete. Late or failed work
+  preserves the most recently committed blend. Each child is reaped before
+  the next worker starts, and process creation failure falls back safely.
 
 Nothing is trained offline and no weights are bundled.
 
-The packaged candidate passed all three full-size, seed-0 synthetic phase-1
-checks on Python 3.13.15, with each scorer process restricted to one CPU core.
-Total scorer wall time was 257.9788586390205 s: UNICEF 18.960066691972315 s,
-World Bank 45.34330749907531 s and UNHCR 193.67548444797285 s. Qualification
-also covered the interaction structure, fold isolation, missing classes,
-output alignment, and process timeout and failure cleanup. These measurements
-qualify behavior and runtime. The candidate still needs a scored competition
-submission to measure its performance on the unreleased surveys.
+The qualification record for this candidate is in
+`../runs/cycle_20261011T0830/validation.json` and its `evidence/` directory.
+The phase-1 sandboxes are synthetic. Their scores establish contract, coverage
+and runtime only. They do not estimate utility on the unreleased
+survey data.
 
 ## Reproduce
 
