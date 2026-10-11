@@ -50,11 +50,25 @@ visible rows of the frame:
 
 Nothing is trained offline and no weights are bundled.
 
-The qualification record for this candidate is in
-`../runs/cycle_20261011T0830/validation.json` and its `evidence/` directory.
-The phase-1 sandboxes are synthetic. Their scores establish contract, coverage
-and runtime only. They do not estimate utility on the unreleased
-survey data.
+Local qualification completed on 2026-10-11. This candidate is qualified for
+review but has not been submitted. The final record and command evidence are in
+`../runs/cycle_20261011T0830/after_fix/validation.json`. The earlier
+`../runs/cycle_20261011T0830/validation_attempt1.json` was invalidated after a
+row-alignment defect was found. The final record links that attempt and records
+the corrected source's red/green control.
+
+All three full-size seed-0 phase-1 synthetic scorers passed sequentially on one
+CPU core. Whole-scorer wall time, tree coverage, and peak resident memory were:
+
+| Instrument | Wall time | Eligible / completed tree items | Peak RSS |
+| --- | ---: | ---: | ---: |
+| UNICEF | 30.57 s | 12 / 12 | 216.95 MiB |
+| World Bank | 113.68 s | 76 / 76 | 226.52 MiB |
+| UNHCR | 253.73 s | 180 / 92 | 431.41 MiB |
+
+Total scorer wall time was 397.98 s. Maximum RSS was 0.421 GiB. Synthetic
+scores qualify the output contract, exercised tree coverage, and runtime only.
+They do not estimate utility on the unreleased survey data.
 
 ## Reproduce
 
