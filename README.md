@@ -1,4 +1,4 @@
-# SimulacraBench submission: stack_trees_v5
+# SimulacraBench submission: stack_trees_v6
 
 Code for the SimulacraBench competition on Codabench: probabilistic completion
 of survey responses for three instruments (UNICEF, World Bank, UNHCR). For each
@@ -35,10 +35,10 @@ visible rows of the frame:
   member uses the same folds and scorer objective, with its own simplex search.
 - Complete count-model predictions are computed first. Optional item fitting
   runs serially in separate Linux processes. The matched-fold LR stage has a
-  20 s item limit and a deadline 180 s after entry into `predict()`. It caches
-  only complete OOF true-class probabilities for both backoff and LR. The
-  categorical HistGradientBoosting stage follows through 240 s after entry,
-  also with a 20 s item limit, for items with at least 600 known labels, two
+  20 s item limit and a deadline capped at 180 s after entry into `predict()`.
+  It caches only complete OOF true-class probabilities for both backoff and LR.
+  The categorical HistGradientBoosting stage follows through the schema-based
+  instrument allocation after entry, also with a 20 s item limit, for items with at least 600 known labels, two
   observed classes and a complete LR OOF cache. Its three fold models use only
   each fold's complement. Declared GIVEN category order is retained. Unknown
   and missing values become missing categories. Each tree distribution is mixed
@@ -50,25 +50,40 @@ visible rows of the frame:
 
 Nothing is trained offline and no weights are bundled.
 
-Local qualification completed on 2026-10-11. This candidate is qualified for
-review but has not been submitted. The final record and command evidence are in
-`../runs/cycle_20261011T0830/after_fix/validation.json`. The earlier
-`../runs/cycle_20261011T0830/validation_attempt1.json` was invalidated after a
-row-alignment defect was found. The final record links that attempt and records
-the corrected source's red/green control.
+Local qualification completed on 2026-10-12. The optional fitting deadlines are
+measured from `predict()` entry and use schema-declared GIVEN keys: UNICEF
+(`Country`) receives 90 s, World Bank (`group`) 180 s, and UNHCR (`wave`) 450 s.
+Unknown schemas receive 240 s. The LR deadline is the earlier of 180 s and the
+instrument allocation. Tree work uses the full allocation. The 20 s per-item
+limit, model design, folds, eligibility, queue and fallback remain unchanged.
 
-All three full-size seed-0 phase-1 synthetic scorers passed sequentially on one
-CPU core. Whole-scorer wall time, tree coverage, and peak resident memory were:
+The official ZIP checker and text check passed. All three full-size seed-0
+phase-1 synthetic scorers passed sequentially on one CPU core. Whole-scorer
+wall time, eligible/completed tree items, positive-weight commits, and peak RSS
+were:
 
-| Instrument | Wall time | Eligible / completed tree items | Peak RSS |
-| --- | ---: | ---: | ---: |
-| UNICEF | 30.57 s | 12 / 12 | 216.95 MiB |
-| World Bank | 113.68 s | 76 / 76 | 226.52 MiB |
-| UNHCR | 253.73 s | 180 / 92 | 431.41 MiB |
+| Instrument | Wall time | Eligible / completed | Positive-weight commits | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| UNICEF | 33.86 s | 12 / 12 | 12 | 230.70 MiB |
+| World Bank | 133.57 s | 76 / 76 | 73 | 234.11 MiB |
+| UNHCR | 315.87 s | 168 / 164 | 162 | 443.62 MiB |
 
-Total scorer wall time was 397.98 s. Maximum RSS was 0.421 GiB. Synthetic
-scores qualify the output contract, exercised tree coverage, and runtime only.
-They do not estimate utility on the unreleased survey data.
+Total scorer wall time was 483.30 s. Maximum RSS was 0.433 GiB. A frozen
+late-queue control used 3,072 training rows and a separate 1,024-row outer
+holdout with all 64 six-binary input combinations balanced and a constant wave.
+The control executed both versions of `predict()`. An earlier gated tree
+worker advanced the virtual clock by 250 s, so v5's 240 s schedule skipped
+the later target and v6's 450 s schedule completed it. Admission and worker
+deadlines used virtual time. OOF selection and full fits used real models
+and training rows. The selected tree weight was 0.50 and outer epsilon-mixed
+log loss improved by 0.1418954348493729 nats, exceeding the frozen 0.01
+threshold. Whole-scorer timings used real clocks.
+
+The prior v5 submission had a displayed score of 0.63. That single score does
+not establish a causal model gain. The v6 synthetic scores (UNICEF 0.50, World
+Bank 0.44, UNHCR 0.55) qualify behavior and runtime only. They do not estimate
+utility on unreleased survey data. This candidate passed local qualification
+and has not been submitted.
 
 ## Reproduce
 

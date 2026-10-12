@@ -47,6 +47,14 @@ INTERACTION_COLUMNS = 1024
 COUNTRY_COLUMNS = ("Country", "user.country", "s1_2_country_asylum_lbl")
 
 
+def _instrument_budget(records):
+    """Reserve more optional fitting time for the larger UNHCR item set."""
+    for name, seconds in (("wave", 450.0), ("group", 180.0), ("Country", 90.0)):
+        if records.get(name, {}).get("class") == "GIVEN":
+            return seconds
+    return 240.0
+
+
 def _codes(column):
     codes, _ = pd.factorize(column.astype(object), use_na_sentinel=False)
     return codes.astype(np.int64)
@@ -374,9 +382,10 @@ def _best_weight(backoff, lr, k):
 
 def predict(frame, schema):
     entry = time.monotonic()
-    lr_deadline = entry + BUDGET_SECONDS
-    tree_deadline = entry + 240.0
     records = schema["items"]
+    allocation = _instrument_budget(records)
+    lr_deadline = entry + min(BUDGET_SECONDS, allocation)
+    tree_deadline = entry + allocation
     items = [name for name, r in records.items() if r["class"] in ("GIVEN", "PREDICT")]
     given = [name for name in items if records[name]["class"] == "GIVEN"]
     targets = [name for name in items if records[name]["class"] == "PREDICT"]
