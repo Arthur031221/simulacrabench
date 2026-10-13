@@ -17,7 +17,9 @@ An L2 multinomial logistic regression on the one-hot GIVEN block and
 country/wave interactions is selected against backoff on matched folds. A
 schema-categorical shallow HistGradientBoosting member can then join that
 blend, selected on the same folds with fold-local marginal smoothing and a
-temperature grid. Complete backoff predictions are computed first. Optional
+temperature grid. Gated UNHCR trees can use separate temperatures for sentinel
+mass and conditional answers when they improve the matched-fold score.
+Complete backoff predictions are computed first. Optional
 item workers run serially with time limits. Incomplete or late work preserves
 the last complete blend.
 """
@@ -248,24 +250,57 @@ def _epsilon_true_score(p, y, k):
     return float(np.mean(np.log(EPS + (1 - k * EPS) * p[np.arange(len(y)), y])))
 
 
-def _select_tree(backoff_true, lr_true, tree_oof, y, k):
-    """Grid search simplex weights and temperature with deterministic ties."""
-    best = None
-    for tree_weight in np.arange(0.0, 0.50001, 0.1):
-        for temperature in (0.75, 1.0, 1.5, 2.0):
-            calibrated = _temperature(tree_oof, temperature)
-            for backoff_weight in np.arange(0.0, 1.00001 - tree_weight, 0.1):
-                lr_weight = 1.0 - tree_weight - backoff_weight
-                truth = (backoff_weight * backoff_true + lr_weight * lr_true
-                         + tree_weight * calibrated[np.arange(len(y)), y])
-                score = float(np.mean(np.log(EPS + (1 - k * EPS) * truth)))
-                # Prefer zero tree weight, then more backoff. Stable temperature
-                # order resolves any remaining exact ties.
-                key = (score, -tree_weight, backoff_weight, -temperature)
-                if best is None or key > best[0]:
-                    best = (key, backoff_weight, lr_weight, tree_weight,
-                            temperature)
-    return best[1:]
+def _gate_temperature(p, gate_temperature, answer_temperature, gated_index):
+    """Calibrate sentinel mass separately from the conditional answers."""
+    answers = np.arange(p.shape[1]) != gated_index
+    log_answers = np.log(np.maximum(p[:, answers], 1e-15)) / answer_temperature
+    log_answers -= log_answers.max(axis=1, keepdims=True)
+    conditional = np.exp(log_answers)
+    conditional /= conditional.sum(axis=1, keepdims=True)
+    log_asked = np.log(np.maximum(p[:, answers].sum(axis=1), 1e-15)) / gate_temperature
+    log_gated = np.log(np.maximum(p[:, gated_index], 1e-15)) / gate_temperature
+    normalizer = np.logaddexp(log_asked, log_gated)
+    q = np.empty_like(p, dtype=float)
+    q[:, answers] = np.exp(log_asked - normalizer)[:, None] * conditional
+    q[:, gated_index] = np.exp(log_gated - normalizer)
+    return q
+
+
+def _calibrate_tree(p, temperature, gated_index):
+    if isinstance(temperature, tuple):
+        return _gate_temperature(p, *temperature, gated_index)
+    return _temperature(p, temperature)
+
+
+def _select_tree(backoff_true, lr_true, tree_oof, y, k, gated_index=None):
+    """Retain joint calibration unless separate temperatures improve OOF."""
+    grid = (0.75, 1.0, 1.5, 2.0)
+    index = np.arange(len(y))
+
+    def select(candidates):
+        best = None
+        for temperature, order, calibrated in candidates:
+            tree_true = calibrated[index, y]
+            for tree_weight in np.arange(0.0, 0.50001, 0.1):
+                for backoff_weight in np.arange(0.0, 1.00001 - tree_weight, 0.1):
+                    lr_weight = 1.0 - tree_weight - backoff_weight
+                    truth = (backoff_weight * backoff_true + lr_weight * lr_true
+                             + tree_weight * tree_true)
+                    score = float(np.mean(np.log(EPS + (1 - k * EPS) * truth)))
+                    key = (score, -tree_weight, backoff_weight, *order)
+                    if best is None or key > best[0]:
+                        best = (key, backoff_weight, lr_weight, tree_weight,
+                                temperature)
+        return best
+
+    joint = select((t, (-t,), _temperature(tree_oof, t)) for t in grid)
+    if gated_index is not None:
+        separate = select(((tg, ta), (-tg, -ta),
+                           _gate_temperature(tree_oof, tg, ta, gated_index))
+                          for tg in grid for ta in grid)
+        if separate[0][0] > joint[0][0] + MIN_GAIN:
+            return separate[1:]
+    return joint[1:]
 
 
 def _tree_oof(x, rows, y, k, fold, deadline):
@@ -302,13 +337,13 @@ def _lr_worker(sender, features, rows, held, y, k, x, fold, deadline):
 
 
 def _tree_worker(sender, xcat, rows, held, y, k, fold, backoff_true,
-                 lr_true, lr_full, current_weight, xlr, deadline):
+                 lr_true, lr_full, current_weight, xlr, gated_index, deadline):
     try:
         result = None
         tree_oof = _tree_oof(xcat, rows, y, k, fold, deadline)
         if tree_oof is not None:
             bw, lw, tw, temperature = _select_tree(
-                backoff_true, lr_true, tree_oof, y, k)
+                backoff_true, lr_true, tree_oof, y, k, gated_index)
             if tw == 0:
                 result = (bw, lw, tw, None, None)
             elif time.monotonic() < deadline:
@@ -316,7 +351,7 @@ def _tree_worker(sender, xcat, rows, held, y, k, fold, backoff_true,
                 if lw > 0 and lr_full is None and time.monotonic() < deadline:
                     lr_full = _lr_proba(xlr[rows], y, xlr[held], k)
                 if lw == 0 or lr_full is not None:
-                    tree_full = _temperature(tree_full, temperature)
+                    tree_full = _calibrate_tree(tree_full, temperature, gated_index)
                     result = (bw, lw, tw, lr_full, tree_full)
         sender.send(result)
     except Exception:
@@ -368,10 +403,10 @@ def _bounded_stack(features, rows, held, y, k, x, fold, deadline):
 
 
 def _bounded_tree(xcat, rows, held, y, k, fold, backoff_true, lr_true,
-                  lr_full, current_weight, xlr, deadline):
+                  lr_full, current_weight, xlr, deadline, gated_index=None):
     return _bounded_worker(_tree_worker,
         (xcat, rows, held, y, k, fold, backoff_true, lr_true, lr_full,
-         current_weight, xlr), deadline)
+         current_weight, xlr, gated_index), deadline)
 
 
 def _best_weight(backoff, lr, k):
@@ -456,9 +491,11 @@ def predict(frame, schema):
                 break
             rows, y, k, item_fold = training[name]
             backoff_true, lr_true, lr_full, old_weight = lr_cache[name]
+            gated_index = (k - 1 if records.get("wave", {}).get("class") == "GIVEN"
+                           and records[name].get("gate") else None)
             member = _bounded_tree(xcat, rows, held, y, k, item_fold,
                                    backoff_true, lr_true, lr_full, old_weight,
-                                   xlr, tree_deadline)
+                                   xlr, tree_deadline, gated_index=gated_index)
             if member is not None and time.monotonic() < tree_deadline:
                 bw, lw, tw, regression, tree = member
                 if tw > 0:
