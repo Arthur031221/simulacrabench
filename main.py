@@ -251,7 +251,7 @@ def _epsilon_true_score(p, y, k):
 def _select_tree(backoff_true, lr_true, tree_oof, y, k):
     """Grid search simplex weights and temperature with deterministic ties."""
     best = None
-    for tree_weight in np.arange(0.0, 0.50001, 0.1):
+    for tree_weight in np.arange(0.0, 1.00001, 0.1):
         for temperature in (0.75, 1.0, 1.5, 2.0):
             calibrated = _temperature(tree_oof, temperature)
             for backoff_weight in np.arange(0.0, 1.00001 - tree_weight, 0.1):
