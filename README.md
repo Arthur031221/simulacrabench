@@ -1,4 +1,4 @@
-# SimulacraBench submission: stack_trees_v7
+# SimulacraBench submission: stack_trees_v6
 
 This submission predicts missing survey answers from the visible TRAIN rows and
 GIVEN answers. It implements `predict(frame, schema)` for the organisers' runner.
@@ -15,12 +15,7 @@ shallow categorical histogram gradient boosting model. Three matched folds
 select the blend using the evaluator's epsilon-mixed log score. The tree weight
 is capped at 0.5. Each selected model is refitted on the visible training rows.
 
-For gated UNHCR targets, v7 also considers separate temperatures for the
-probability of being asked and the answer distribution conditional on being
-asked. Both temperatures use the fixed grid 0.75, 1, 1.5 and 2. This family must
-beat the best joint-temperature blend by more than 0.0001 nats per cell on the
-same folds. Otherwise the joint-temperature blend remains selected. Other
-targets use joint temperature calibration.
+Tree outputs use a single temperature selected from 0.75, 1, 1.5 and 2.
 
 Complete count predictions are computed first. Optional model workers run
 serially, with a 20-second limit per item. The fitting budgets are 90 seconds
@@ -29,15 +24,20 @@ the item's last complete prediction intact.
 
 ## Validation
 
-The full-size public synthetic sandboxes passed the official phase-1 scorer
-for all three instruments. Sequential CPU execution took 460.04 seconds in
-total and peaked at 603,200 KiB RSS. UNHCR completed 167 of 171 eligible tree
-workers. These sandboxes check the runner contract and resource limits.
-They do not estimate performance on the competition's private data.
+An independent synthetic comparison fitted v5, v6 and v7 on three fixed seeds,
+with 6,000 training respondents and 20,000 outer respondents in each of two
+distributions per seed. Each call covered six gated three-class targets and
+two ungated targets. All 144 optional workers completed, including 72 tree
+selections. Outputs were legal and child processes were reaped.
+
+V7 added separate gate and answer temperatures. Its mean gain over v6 on the
+two declared calibration targets was 0.00001146 nats per cell, below the fixed
+0.005 requirement. The paired 95% interval was -0.00011579 to 0.00013727.
+The separate calibration was removed from the active source. These synthetic
+controls do not estimate performance on the private competition data.
 
 The best Development entry remains v5, submission 979285, with mean skill
-0.63. The v6 entry, submission 981529, scored 0.6266666667. v7 has not been
-submitted.
+0.63. The v6 entry, submission 981529, scored 0.6266666667. V7 was not submitted.
 
 ## Reproduce
 
