@@ -229,7 +229,9 @@ def _tree_proba(x_fit, y_fit, x_out, k):
             warnings.simplefilter("ignore")
             model = HistGradientBoostingClassifier(
                 loss="log_loss", max_iter=60, learning_rate=0.08,
-                max_depth=3, max_leaf_nodes=7, min_samples_leaf=40,
+                max_depth=5 if "wave" in x_fit.columns else 3,
+                max_leaf_nodes=15 if "wave" in x_fit.columns else 7,
+                min_samples_leaf=40,
                 l2_regularization=5, max_bins=255, early_stopping=False,
                 random_state=0, categorical_features="from_dtype",
             ).fit(x_fit, y_fit)
